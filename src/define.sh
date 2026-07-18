@@ -16,17 +16,21 @@ set -Eeuo pipefail
 : "${USERNAME:=""}"
 : "${PASSWORD:=""}"
 
+# Sanitize variables
+KEY=$(strip "$KEY")
+WIDTH=$(strip "$WIDTH")
+HEIGHT=$(strip "$HEIGHT")
+REGION=$(strip "$REGION")
+EDITION=$(strip "$EDITION")
+KEYBOARD=$(strip "$KEYBOARD")
+LANGUAGE=$(strip "$LANGUAGE")
+USERNAME=$(strip "$USERNAME")
+
 MIRRORS=4
 
 parseVersion() {
 
-  if [[ "${VERSION}" == \"*\" || "${VERSION}" == \'*\' ]]; then
-    VERSION="${VERSION:1:-1}"
-  fi
-
-  VERSION="${VERSION#"${VERSION%%[! ]*}"}"
-  VERSION="${VERSION%"${VERSION##*[! ]}"}"
-
+  VERSION=$(strip "$VERSION")
   [ -z "$VERSION" ] && VERSION="win11"
 
   case "${VERSION,,}" in
@@ -149,7 +153,7 @@ parseVersion() {
       VERSION="tiny11"
       [ -z "$DETECTED" ] && DETECTED="win11x64"
       ;;
-   "tiny10" | "tiny 10" )
+    "tiny10" | "tiny 10" )
       VERSION="tiny10"
       [ -z "$DETECTED" ] && DETECTED="win10x64-ltsc"
       ;;
@@ -171,32 +175,26 @@ getLanguage() {
     "ar" | "ar-"* )
       short="ar"
       lang="Arabic"
-      desc="$lang"
       culture="ar-SA" ;;
     "bg" | "bg-"* )
       short="bg"
       lang="Bulgarian"
-      desc="$lang"
       culture="bg-BG" ;;
     "cs" | "cs-"* | "cz" | "cz-"* )
       short="cs"
       lang="Czech"
-      desc="$lang"
       culture="cs-CZ" ;;
     "da" | "da-"* | "dk" | "dk-"* )
       short="da"
       lang="Danish"
-      desc="$lang"
       culture="da-DK" ;;
     "de" | "de-"* )
       short="de"
       lang="German"
-      desc="$lang"
       culture="de-DE" ;;
     "el" | "el-"* | "gr" | "gr-"* )
       short="el"
       lang="Greek"
-      desc="$lang"
       culture="el-GR" ;;
     "gb" | "en-gb" )
       short="en-gb"
@@ -206,7 +204,6 @@ getLanguage() {
     "en" | "en-"* )
       short="en"
       lang="English"
-      desc="English"
       culture="en-US" ;;
     "mx" | "es-mx" )
       short="mx"
@@ -216,17 +213,14 @@ getLanguage() {
     "es" | "es-"* )
       short="es"
       lang="Spanish"
-      desc="$lang"
       culture="es-ES" ;;
     "et" | "et-"* )
       short="et"
       lang="Estonian"
-      desc="$lang"
       culture="et-EE" ;;
     "fi" | "fi-"* )
       short="fi"
       lang="Finnish"
-      desc="$lang"
       culture="fi-FI" ;;
     "ca" | "fr-ca" )
       short="ca"
@@ -236,62 +230,50 @@ getLanguage() {
     "fr" | "fr-"* )
       short="fr"
       lang="French"
-      desc="$lang"
       culture="fr-FR" ;;
     "he" | "he-"* | "il" | "il-"* )
       short="he"
       lang="Hebrew"
-      desc="$lang"
       culture="he-IL" ;;
     "hr" | "hr-"* | "cr" | "cr-"* )
       short="hr"
       lang="Croatian"
-      desc="$lang"
       culture="hr-HR" ;;
     "hu" | "hu-"* )
       short="hu"
       lang="Hungarian"
-      desc="$lang"
       culture="hu-HU" ;;
     "it" | "it-"* )
       short="it"
       lang="Italian"
-      desc="$lang"
       culture="it-IT" ;;
     "ja" | "ja-"* | "jp" | "jp-"* )
       short="ja"
       lang="Japanese"
-      desc="$lang"
       culture="ja-JP" ;;
     "ko" | "ko-"* | "kr" | "kr-"* )
       short="ko"
       lang="Korean"
-      desc="$lang"
       culture="ko-KR" ;;
     "lt" | "lt-"* )
       short="lt"
       lang="Lithuanian"
-      desc="$lang"
       culture="lt-LT" ;;
     "lv" | "lv-"* )
       short="lv"
       lang="Latvian"
-      desc="$lang"
       culture="lv-LV" ;;
     "nb" | "nb-"* | "nn" | "nn-"* | "no" | "no-"* )
       short="no"
       lang="Norwegian"
-      desc="$lang"
       culture="nb-NO" ;;
     "nl" | "nl-"* )
       short="nl"
       lang="Dutch"
-      desc="$lang"
       culture="nl-NL" ;;
     "pl" | "pl-"* )
       short="pl"
       lang="Polish"
-      desc="$lang"
       culture="pl-PL" ;;
     "br" | "pt-br" )
       short="pt"
@@ -301,27 +283,22 @@ getLanguage() {
     "pt" | "pt-"* )
       short="pp"
       lang="Portuguese"
-      desc="$lang"
       culture="pt-BR" ;;
     "ro" | "ro-"* )
       short="ro"
       lang="Romanian"
-      desc="$lang"
       culture="ro-RO" ;;
     "ru" | "ru-"* )
       short="ru"
       lang="Russian"
-      desc="$lang"
       culture="ru-RU" ;;
     "sk" | "sk-"* )
       short="sk"
       lang="Slovak"
-      desc="$lang"
       culture="sk-SK" ;;
     "sl" | "sl-"* | "si" | "si-"* )
       short="sl"
       lang="Slovenian"
-      desc="$lang"
       culture="sl-SI" ;;
     "sr" | "sr-"* )
       short="sr"
@@ -331,22 +308,18 @@ getLanguage() {
     "sv" | "sv-"* | "se" | "se-"* )
       short="sv"
       lang="Swedish"
-      desc="$lang"
       culture="sv-SE" ;;
     "th" | "th-"* )
       short="th"
       lang="Thai"
-      desc="$lang"
       culture="th-TH" ;;
     "tr" | "tr-"* )
       short="tr"
       lang="Turkish"
-      desc="$lang"
       culture="tr-TR" ;;
     "ua" | "ua-"* | "uk" | "uk-"* )
       short="uk"
       lang="Ukrainian"
-      desc="$lang"
       culture="uk-UA" ;;
     "hk" | "zh-hk" | "cn-hk" )
       short="hk"
@@ -364,6 +337,8 @@ getLanguage() {
       desc="Chinese"
       culture="zh-CN" ;;
   esac
+
+  [ -z "$desc" ] && desc="$lang"
 
   case "${ret,,}" in
     "desc" ) echo "$desc" ;;
@@ -724,8 +699,8 @@ getMido() {
 
   case "${id,,}" in
     "win11x64" )
-      size=8471603200
-      sum="768984706b909479417b2368438909440f2967ff05c6a9195ed2667254e465e3"
+      size=7736125440
+      sum="d141f6030fed50f75e2b03e1eb2e53646c4b21e5386047cb860af5223f102a32"
       url="https://software-static.download.prss.microsoft.com/dbazure/888969d5-f34g-4e03-ac9d-1f9786c66749/26200.6584.250915-1905.25h2_ge_release_svc_refresh_CLIENT_CONSUMER_x64FRE_en-us.iso"
       ;;
     "win11x64-enterprise-eval" )
@@ -764,15 +739,15 @@ getMido() {
       url="https://software-static.download.prss.microsoft.com/sg/download/888969d5-f34g-4e03-ac9d-1f9786c66749/SERVER_EVAL_x64FRE_en-us.iso"
       ;;
     "win2019-eval" )
-      size=5652088832
-      sum="6dae072e7f78f4ccab74a45341de0d6e2d45c39be25f1f5920a2ab4f51d7bcbb"
+      size=5296713728
+      sum="549bca46c055157291be6c22a3aaaed8330e78ef4382c99ee82c896426a1cee1"
       url="https://software-download.microsoft.com/download/pr/17763.737.190906-2324.rs5_release_svc_refresh_SERVER_EVAL_x64FRE_en-us_1.iso"
-     ;;
+      ;;
     "win2019-hv" )
-      size=3072712704
-      sum="48e9b944518e5bbc80876a9a7ff99716f386f404f4be48dca47e16a66ae7872c"
+      size=3022784512
+      sum="cb28984af65ba1085cd6ade5fdd3d9c75efe7618846513f9ad44f1397a409f85"
       url="https://software-download.microsoft.com/download/pr/17763.557.190612-0019.rs5_release_svc_refresh_SERVERHYPERCORE_OEM_x64FRE_en-us.ISO"
-     ;;
+      ;;
     "win2016-eval" )
       size=6972221440
       sum="1ce702a578a3cb1ac3d14873980838590f06d5b7101c5daaccbac9d73f1fb50f"
@@ -815,8 +790,8 @@ getLink1() {
 
   case "${id,,}" in
     "win11x64" | "win11x64-enterprise" | "win11x64-enterprise-eval" )
-      size=6898546688
-      sum="2618a56931b645a6f097082431994bd85ae80862518de389e382f35ebfd455be"
+      size=6927149056
+      sum="f5ffe9313eebc6299fba9e6eeb2971007264e6c6be013073a89b5ae9bd85bfb3"
       url="11/en-us_windows_11_25h2_x64.iso"
       ;;
     "win11x64-iot" | "win11x64-enterprise-iot" | "win11x64-enterprise-iot-eval" )
@@ -830,8 +805,8 @@ getLink1() {
       url="11/X23-81951_26100.1742.240906-0331.ge_release_svc_refresh_CLIENT_ENTERPRISES_OEM_x64FRE_en-us.iso"
       ;;
     "win10x64" | "win10x64-enterprise" | "win10x64-enterprise-eval" )
-      size=5767888896
-      sum="9dce12d73168debc697919a6bc4d8c6624b2175bbed01a2ca97edb7d93627319"
+      size=5723299840
+      sum="316f718f21fc9b386d81dadd62dc60268a1cfd65b184ac6a052875a454c3431b"
       url="10/en-us_windows_10_22h2_x64.iso"
       ;;
     "win10x64-iot" | "win10x64-enterprise-iot" | "win10x64-enterprise-iot-eval" )
@@ -1316,7 +1291,7 @@ isMido() {
   local lang="$2"
   local sum
 
-  [[ "${MIDO:-}" == [Nn]* ]] && return 1
+  disabled "${MIDO:-}" && return 1
 
   sum=$(getMido "$id" "en" "sum")
   [ -n "$sum" ] && return 0
@@ -1329,7 +1304,7 @@ isESD() {
   local id="$1"
   local lang="$2"
 
-  [[ "${ESD:-}" == [Nn]* ]] && return 1
+  disabled "${ESD:-}" && return 1
 
   case "${id,,}" in
     "win11${PLATFORM,,}" | "win10${PLATFORM,,}" )
@@ -1384,7 +1359,13 @@ addFolder() {
 
   local file
   file=$(find "$dest" -maxdepth 1 -type f -iname install.bat  -print -quit)
-  [ -f "$file" ] && unix2dos -q "$file"
+
+  if [ -f "$file" ]; then
+    if ! unix2dos -q "$file"; then
+      error "Failed to convert $file to DOS format!"
+      return 1
+    fi
+  fi
 
   return 0
 }
@@ -1577,8 +1558,8 @@ prepareInstall() {
   [ -z "$WIDTH" ] && WIDTH="1280"
   [ -z "$HEIGHT" ] && HEIGHT="720"
 
-  XHEX=$(printf '%x\n' "$WIDTH")
-  YHEX=$(printf '%x\n' "$HEIGHT")
+  XHEX=$(printf '%08x\n' "$WIDTH")
+  YHEX=$(printf '%08x\n' "$HEIGHT")
 
   local username=""
   local password=""
@@ -1697,13 +1678,13 @@ prepareInstall() {
           echo ""
           echo "[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Video\{23A77BF7-ED96-40EC-AF06-9B1F4867732A}\0000]"
           echo "\"DefaultSettings.BitsPerPel\"=dword:00000020"
-          echo "\"DefaultSettings.XResolution\"=dword:00000$XHEX"
-          echo "\"DefaultSettings.YResolution\"=dword:00000$YHEX"
+          echo "\"DefaultSettings.XResolution\"=dword:$XHEX"
+          echo "\"DefaultSettings.YResolution\"=dword:$YHEX"
           echo ""
           echo "[HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Hardware Profiles\Current\System\CurrentControlSet\Control\VIDEO\{23A77BF7-ED96-40EC-AF06-9B1F4867732A}\0000]"
           echo "\"DefaultSettings.BitsPerPel\"=dword:00000020"
-          echo "\"DefaultSettings.XResolution\"=dword:00000$XHEX"
-          echo "\"DefaultSettings.YResolution\"=dword:00000$YHEX"
+          echo "\"DefaultSettings.XResolution\"=dword:$XHEX"
+          echo "\"DefaultSettings.YResolution\"=dword:$YHEX"
           echo ""
           echo "[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\RunOnce]"
           echo "\"ScreenSaver\"=\"reg add \\\"HKCU\\\\Control Panel\\\\Desktop\\\" /f /v \\\"SCRNSAVE.EXE\\\" /t REG_SZ /d \\\"off\\\"\""
@@ -1795,23 +1776,39 @@ prepareLegacy() {
   local dir="$2"
   local desc="$3"
 
+  local tmp="$TMP/boot-images"
+  local image="$tmp/eltorito_img1_bios.img"
+
   ETFS="boot.img"
 
-  [ -f "$dir/$ETFS" ] && [ -s "$dir/$ETFS" ] && return 0
+  [ -s "$dir/$ETFS" ] && return 0
   rm -f "$dir/$ETFS"
+  rm -rf "$tmp"
 
-  local len offset
-  len=$(isoinfo -d -i "$iso" | grep "Nsect " | grep -o "[^ ]*$")
-  offset=$(isoinfo -d -i "$iso" | grep "Bootoff " | grep -o "[^ ]*$")
-
-  if ! dd "if=$iso" "of=$dir/$ETFS" bs=2048 "count=$len" "skip=$offset" status=none; then
-    error "Failed to extract boot image from $desc ISO!" && return 1
+  if ! LC_ALL=C xorriso \
+      -no_rc \
+      -osirrox on \
+      -indev "$iso" \
+      -extract_boot_images "$tmp" >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    error "Failed to extract boot image from $desc ISO!"
+    return 1
   fi
 
-  [ -f "$dir/$ETFS" ] && [ -s "$dir/$ETFS" ] && return 0
+  if [ ! -s "$image" ]; then
+    rm -rf "$tmp"
+    error "Failed to locate BIOS boot image in $desc ISO!"
+    return 1
+  fi
 
-  error "Failed to locate file \"$ETFS\" in $desc ISO image!"
-  return 1
+  if ! mv -f "$image" "$dir/$ETFS"; then
+    rm -rf "$tmp"
+    error "Failed to save boot image from $desc ISO!"
+    return 1
+  fi
+
+  rm -rf "$tmp"
+  return 0
 }
 
 detectLegacy() {
@@ -1931,7 +1928,8 @@ setMachine() {
       [ -z "${ADAPTER:-}" ] && ADAPTER="rtl8139" ;;
     "winxp"* | "win2003"* )
       DISK_TYPE="blk"
-      BOOT_MODE="windows_legacy" ;;
+      BOOT_MODE="windows_legacy"
+      [ -z "${SOUND:-}" ] && SOUND="usb-audio" ;;
     "winvista"* | "win7"* | "win2008"* )
       BOOT_MODE="windows_legacy" ;;
   esac
