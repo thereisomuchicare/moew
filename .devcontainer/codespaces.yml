@@ -3,7 +3,7 @@ services:
     container_name: windows
     image: ghcr.io/dockur/windows
     environment:
-      RAM_SIZE: "12g"
+      RAM_SIZE: "8g"
       DISK_SIZE: "32g"
       CPU_CORES: "max"
     devices:
