@@ -6,6 +6,7 @@ services:
       RAM_SIZE: "8g"
       DISK_SIZE: "32g"
       CPU_CORES: "max"
+      DISK_MINIMUM: "1G"
     devices:
       - /dev/kvm
       - /dev/net/tun

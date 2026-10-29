@@ -6,7 +6,6 @@ handleCurlError() {
   local code="$1"
   local server="$2"
   local reason="${3:-}"
-  local signal=""
 
   if [ -n "$reason" ] && (( code <= 125 )); then
     error "Request to $server servers failed: ${reason%.}."
@@ -22,6 +21,7 @@ handleCurlError() {
         return 1
       fi
 
+      local signal
       signal=$(kill -l "$((code - 128))" 2>/dev/null || true)
 
       case "$signal" in
@@ -29,8 +29,7 @@ handleCurlError() {
         SEGV | ABRT) error "Curl crashed with signal $signal." ;;
         "") error "Curl terminated with exit status $code." ;;
         *) error "Curl terminated due to signal $signal." ;;
-      esac
-      ;;
+      esac ;;
   esac
 
   return 1
@@ -38,19 +37,19 @@ handleCurlError() {
 
 curlRequest() {
 
-  local output="$1"
-  local server="$2"
-  local agent="$3"
-  shift 3
+  local server="$1"
+  local agent="$2"
+  shift 2
 
-  local log reason 
-  local rc=0 response=""
+  local log reason response
 
-  if ! log=$(mktemp); then
+  if ! log=$(mktemp -p "$QEMU_DIR"); then
     error "Failed to create a temporary curl log."
     return 1
   fi
 
+  # Preserve curl's status under errexit so its stderr can be translated
+  # into a useful error instead of terminating the script immediately.
   {
     response=$(LC_ALL=C curl \
       --silent \
@@ -62,66 +61,43 @@ curlRequest() {
       --tlsv1.2 \
       --http1.1 \
       "$@" 2>"$log")
-    rc=$?
+    local rc=$?
   } || :
 
   if (( rc != 0 )); then
 
     reason=$(sed -nE 's/^curl: \([0-9]+\) //p' "$log" | tail -n 1)
-    
-    rm -f "$log"
-    handleCurlError "$rc" "$server" "$reason"
 
+    rm -f "$log"
+    handleCurlError "$rc" "$server" "$reason" || :
+
+    (( rc >= 129 )) && return "$rc"
     return 1
   fi
 
   rm -f "$log"
 
-  if [ -n "$output" ]; then
-    printf -v "$output" '%s' "$response"
-  fi
-
+  printf '%s' "$response"
   return 0
 }
 
-getAgent() {
+downloadWindowsLink() {
 
-  local browser_version
+  local productId="$1"
+  local url="$2"
+  local agent="$3"
+  local language="$4"
+  local lang="$5"
+  local desc="$6"
+  local type="$7"
 
-  # Approximate Firefox version, increasing every two weeks
-  browser_version="$((152 + ($(date +%s) - 1781568000) / 1209600))"
-  echo "Mozilla/5.0 (X11; Linux x86_64; rv:${browser_version}.0) Gecko/20100101 Firefox/${browser_version}.0"
+  local ovToken="" ovTicks=""
+  local profile="606624d44113"
+  local skuId skuJson linkJson
+  local link ovData ovTime session
 
-  return 0
-}
-
-downloadWindows() {
-
-  local id="$1"
-  local lang="$2"
-  local desc="$3"
-
-  local ovToken="" ovTicks="" ovTime=""
-  local skuId="" skuUrl="" skuJson=""
-  local linkUrl="" linkJson="" link=""
-  local language="" orgId="" ovData=""
-  local instance="" vlsUrl="" ovUrl=""
-  local session="" agent="" type=""
-  local winVer="" page="" productId=""
-  local rc=0 profile="606624d44113"
-
-  agent=$(getAgent)
-  language=$(getLanguage "$lang" "name")
-
-  case "${id,,}" in
-    "win11x64" ) winVer="11" && type="1" ;;
-    "win11arm64" ) winVer="11arm64" && type="2" ;;
-    * ) error "Invalid VERSION specified, value \"$id\" is not recognized!" && return 1 ;;
-  esac
-
-  local url="https://www.microsoft.com/en-us/software-download/windows$winVer"
-
-  # uuidgen: For MacOS (installed by default) and other systems (e.g. with no /proc) that don't have a kernel interface for generating random UUIDs
+  # Prefer the Linux kernel UUID source, with uuidgen as a portable fallback
+  # for macOS and systems without /proc.
   if ! session=$(cat /proc/sys/kernel/random/uuid 2> /dev/null || uuidgen --random); then
     error "Failed to generate session ID!"
     return 1
@@ -134,53 +110,32 @@ downloadWindows() {
     return 1
   fi
 
-  # Get product edition ID for latest release of given Windows version
-  # Product edition ID: This specifies both the Windows release (e.g. 22H2) and edition ("multi-edition" is default, either Home/Pro/Edu/etc., we select "Pro" in the answer files) in one number
-  # This is the *only* request we make that Fido doesn't. Fido manually maintains a list of all the Windows release/edition product edition IDs in its script (see: $WindowsVersions array). This is helpful for downloading older releases (e.g. Windows 10 1909, 21H1, etc.) but we always want to get the newest release which is why we get this value dynamically
-  # Also, keeping a "$WindowsVersions" array like Fido does would be way too much of a maintenance burden
-  # Remove "Accept" header that curl sends by default
-  enabled "$DEBUG" && echo "Parsing download page: ${url}"
+  # Register the session with Microsoft's anti-abuse endpoint before
+  # requesting SKU or download links.
 
-  curlRequest page "Microsoft" "$agent" \
-    --header "Accept:" \
-    --max-filesize 1M \
-    -- "$url" || return 1
-
-  enabled "$DEBUG" && echo -n "Getting Product edition ID: "
-  productId=$(echo "$page" | grep -Eo '<option value="[0-9]+">Windows' | cut -d '"' -f 2 | head -n 1 | tr -cd '0-9' | head -c 16)
-  enabled "$DEBUG" && echo "$productId"
-
-  if [ -z "$productId" ]; then
-    error "Product edition ID not found!"
-    return 1
-  fi
-
-  # Microsoft download "protection" requires the sessionId to be whitelisted through vlscppe.microsoft.com/tags
-
-  orgId="y6jn8c31"
-  vlsUrl="https://vlscppe.microsoft.com/tags?org_id=$orgId&session_id=$session"
+  local orgId="y6jn8c31"
+  local vlsUrl="https://vlscppe.microsoft.com/tags?org_id=$orgId&session_id=$session"
 
   enabled "$DEBUG" && echo "Getting Session ID: $session"
 
-  # Permit Session ID
-  curlRequest "" "Microsoft" "$agent" \
+  curlRequest "Microsoft" "$agent" \
     --output /dev/null \
     --header "Accept:" \
     --max-filesize 100K \
-    -- "$vlsUrl" || return 1
+    -- "$vlsUrl" || return
 
-  # Microsoft download "protection" also requires an ov-df.microsoft.com request/reply
-  # 1) Request mdt.js to get w and rticks. InstanceId is (currently) constant.
+  # Complete Microsoft's ov-df challenge by retrieving a token and timing
+  # value, then returning both with the current timestamp.
 
-  instance="560dc9f3-1aa5-4a2f-b63c-9e18f8d0e175"
-  ovUrl="https://ov-df.microsoft.com/mdt.js?instanceId=$instance&PageId=si&session_id=$session"
+  local instance="560dc9f3-1aa5-4a2f-b63c-9e18f8d0e175"
+  local ovUrl="https://ov-df.microsoft.com/mdt.js?instanceId=$instance&PageId=si&session_id=$session"
 
   enabled "$DEBUG" && echo -n "Getting OV data: "
 
-  curlRequest ovData "Microsoft" "$agent" \
+  ovData=$(curlRequest "Microsoft" "$agent" \
     --header "Accept:" \
     --max-filesize 1M \
-    -- "$ovUrl" || return 1
+    -- "$ovUrl") || return
 
   if [[ $ovData =~ [\?\&]w=([A-Fa-f0-9]+) ]]; then
     ovToken="${BASH_REMATCH[1]}"
@@ -199,71 +154,73 @@ downloadWindows() {
 
   sleep 0.2
 
-  # 2) Send a reply with session ID, current epoch and previously retrieved w and rticks
-
   ovTime=$(date +%s%3N)
   ovUrl="https://ov-df.microsoft.com/?session_id=$session&CustomerId=$instance&PageId=si&w=$ovToken&mdt=$ovTime&rticks=$ovTicks"
 
   enabled "$DEBUG" && echo "Sending OV reply: $instance"
 
-  curlRequest "" "Microsoft" "$agent" \
+  curlRequest "Microsoft" "$agent" \
     --output /dev/null \
     --header "Accept:" \
     --max-filesize 100K \
-    -- "$ovUrl" || return 1
+    -- "$ovUrl" || return
 
   enabled "$DEBUG" && echo -n "Getting language SKU ID: "
 
-  skuUrl="https://www.microsoft.com/software-download-connector/api/getskuinformationbyproductedition?profile=$profile&ProductEditionId=$productId&SKU=undefined&friendlyFileName=undefined&Locale=en-US&sessionID=$session"
+  local skuUrl="https://www.microsoft.com/software-download-connector/api/getskuinformationbyproductedition?profile=$profile&ProductEditionId=$productId&SKU=undefined&friendlyFileName=undefined&Locale=en-US&sessionID=$session"
 
-  curlRequest skuJson "Microsoft" "$agent" \
+  skuJson=$(curlRequest "Microsoft" "$agent" \
     --referer "$url" \
     --header "Accept:" \
     --max-filesize 100K \
-    -- "$skuUrl" || return 1
+    -- "$skuUrl") || return
 
-  { skuId=$(echo "$skuJson" | jq --arg LANG "$language" -r '.Skus[] | select(.Language==$LANG).Id') 2>/dev/null; rc=$?; } || :
+  skuId=$(printf '%s\n' "$skuJson" | jq --arg LANG "$language" -r 'first(.Skus[]? | select(.Language == $LANG) | .Id) // empty') 2>/dev/null || skuId=""
 
-  if [ -z "$skuId" ] || [[ "${skuId,,}" == "null" ]] || (( rc != 0 )); then
-    language=$(getLanguage "$lang" "desc")
-    error "No download in the $language language available for $desc!"
+  if [ -z "$skuId" ] || [[ "${skuId,,}" == "null" ]]; then
+    if [[ "${lang,,}" != "en" && "${lang,,}" != "en-"* ]]; then
+      language=$(getLanguage "$lang" "desc")
+      error "No download in the $language language available for $desc!"
+    else
+      error "Microsoft server provided us no SKU ID in response to our request!"
+      info "Response: $skuJson"
+    fi
     return 1
   fi
 
   enabled "$DEBUG" && echo "$skuId"
   enabled "$DEBUG" && echo "Getting ISO download link..."
 
-  # Get ISO download link
-  # If any request is going to be blocked by Microsoft it's always this last one (the previous requests always seem to succeed)
+  # Microsoft normally applies request or IP blocking on this final connector
+  # call rather than during the preceding session setup.
 
-  linkUrl="https://www.microsoft.com/software-download-connector/api/GetProductDownloadLinksBySku?profile=$profile&ProductEditionId=undefined&SKU=$skuId&friendlyFileName=undefined&Locale=en-US&sessionID=$session"
+  local linkUrl="https://www.microsoft.com/software-download-connector/api/GetProductDownloadLinksBySku?profile=$profile&ProductEditionId=undefined&SKU=$skuId&friendlyFileName=undefined&Locale=en-US&sessionID=$session"
 
-  curlRequest linkJson "Microsoft" "$agent" \
+  linkJson=$(curlRequest "Microsoft" "$agent" \
     --referer "$url" \
     --header "Accept:" \
     --max-filesize 100K \
-    -- "$linkUrl" || return 1
+    -- "$linkUrl") || return
 
   if ! [ "$linkJson" ]; then
-    # This should only happen if there's been some change to how this API works
     error "Microsoft servers gave us an empty response to our request for an automated download."
     return 1
   fi
 
-  if echo "$linkJson" | grep -q "Sentinel marked this request as rejected."; then
+  if grep -Fq "Sentinel marked this request as rejected." <<< "$linkJson"; then
     error "Microsoft blocked the automated download request based on your IP address."
     return 1
   fi
 
-  if echo "$linkJson" | grep -q "We are unable to complete your request at this time."; then
+  if grep -Fq "We are unable to complete your request at this time." <<< "$linkJson"; then
     error "Microsoft blocked the automated download request."
     return 1
   fi
 
-  { link=$(echo "$linkJson" | jq --argjson TYPE "$type" -r '.ProductDownloadOptions[] | select(.DownloadType==$TYPE).Uri') 2>/dev/null; rc=$?; } || :
+  link=$(printf '%s\n' "$linkJson" | jq --argjson TYPE "$type" -r 'first(.ProductDownloadOptions[]? | select(.DownloadType == $TYPE) | .Uri) // empty') 2>/dev/null || link=""
 
-  if [ -z "$link" ] || [[ "${link,,}" == "null" ]] || (( rc != 0 )); then
-    error "Microsoft server gave us no download link to our request for an automated download!"
+  if [ -z "$link" ] || [[ "${link,,}" == "null" ]]; then
+    error "Microsoft server provided us no download link to our request for an automated download!"
     info "Response: $linkJson"
     return 1
   fi
@@ -272,13 +229,88 @@ downloadWindows() {
   return 0
 }
 
+downloadWindows() {
+
+  local id="$1"
+  local lang="$2"
+  local desc="$3"
+
+  local agent language page rc
+  local productId type winVer
+
+  agent=$(getAgent)
+  language=$(getLanguage "$lang" "name")
+
+  case "${id,,}" in
+    "win10x64" )
+      productId="2618"
+      winVer="10"
+      type="1" ;;
+    "win11x64" )
+      productId="3321"
+      winVer="11"
+      type="1" ;;
+    "win11arm64" )
+      productId="3324"
+      winVer="11arm64"
+      type="2" ;;
+    * )
+      error "Invalid VERSION specified, value \"$id\" is not recognized!"
+      return 1 ;;
+  esac
+
+  local url="https://www.microsoft.com/en-us/software-download/windows$winVer"
+  [[ "${id,,}" == "win10"* ]] && url+="ISO"
+
+  enabled "$DEBUG" && echo "Using Product edition ID: $productId"
+
+  if downloadWindowsLink "$productId" "$url" "$agent" "$language" "$lang" "$desc" "$type"; then
+    return 0
+  else
+    rc=$?
+    (( rc == 1 )) || return "$rc"
+  fi
+
+  sleep 1 || return
+
+  # Product edition IDs can change. If the configured ID fails, recover the
+  # current value from Microsoft's public download page and retry once.
+  local msg="retrying using a different method..."
+  info "Microsoft download request failed, $msg"
+  enabled "$DEBUG" && echo "Parsing download page: ${url}"
+
+  page=$(curlRequest "Microsoft" "$agent" \
+    --header "Accept:" \
+    --max-filesize 1M \
+    -- "$url") || return
+
+  enabled "$DEBUG" && echo -n "Getting Product edition ID: "
+  productId=$(printf '%s' "$page" |
+    tr '\r\n' '  ' |
+    grep -Eio "<option[^>]*value=[\"'][0-9]+[\"'][^>]*>[[:space:]]*Windows[^<]*" |
+    sed -nE "s/.*value=[\"']([0-9]+)[\"'].*/\1/p" |
+    sed -n '1p' |
+    cut -c 1-16) || productId=""
+  enabled "$DEBUG" && echo "$productId"
+
+  if [ -z "$productId" ]; then
+    info "Failed to fetch the Product edition ID from the download page, $msg"
+    return 1
+  fi
+
+  downloadWindowsLink "$productId" "$url" "$agent" "$language" "$lang" "$desc" "$type" || return
+
+  return 0
+}
+
 downloadWindowsEval() {
 
   local id="$1"
   local lang="$2"
   local desc="$3"
-  local filter="" culture="" compare="" language=""
-  local agent="" type="" winVer=""
+
+  local compare compare_name link_name
+  local agent culture language type winVer rc
 
   case "${id,,}" in
     "win11${PLATFORM,,}-enterprise-eval" )
@@ -288,8 +320,13 @@ downloadWindowsEval() {
       type="iot"
       winVer="windows-11-iot-enterprise-ltsc-eval" ;;
     "win11${PLATFORM,,}-enterprise-ltsc-eval" )
-      type="iot"
-      winVer="windows-11-iot-enterprise-ltsc-eval" ;;
+      if isPlatform "arm64"; then
+        type="iot"
+        winVer="windows-11-iot-enterprise-ltsc-eval"
+      else
+        type="ltsc"
+        winVer="windows-11-enterprise"
+      fi ;;
     "win2025-eval" )
       type="server"
       winVer="windows-server-2025" ;;
@@ -315,97 +352,175 @@ downloadWindowsEval() {
   agent=$(getAgent)
   culture=$(getLanguage "$lang" "culture")
 
-  local country="${culture#*-}"
-  local link=""
-  local links=""
-  local page=""
+  local country="${culture##*-}"
+  local -a culture_keys=() link_list=()
+  local candidate culture_key key redirect redirect_key
+  local link="" link_index=-1 links page matched all_links
   local url="https://www.microsoft.com/en-us/evalcenter/download-$winVer"
 
   enabled "$DEBUG" && echo "Parsing download page: ${url}"
 
-  curlRequest page "Microsoft" "$agent" \
+  page=$(curlRequest "Microsoft" "$agent" \
     --location \
     --max-filesize 1M \
-    -- "$url" || return 1
+    -- "$url") || return
 
   if ! [ "$page" ]; then
-    # This should only happen if there's been some change to where this download page is located
-    error "Windows server download page gave us an empty response"
+    error "Evaluation Center download page gave us an empty response"
     return 1
   fi
 
   enabled "$DEBUG" && echo "Getting download link.."
 
-  filter="https://go.microsoft.com/fwlink/?linkid=[0-9]\+&clcid=0x[0-9a-z]\+&culture=${culture,,}&country=${country,,}"
+  # Normalize HTML-encoded query separators before extracting fwlinks.
+  page=${page//&amp;/\&}
+  page=${page//&#38;/\&}
 
-  if ! echo "$page" | grep -io "$filter" > /dev/null; then
-    filter="https://go.microsoft.com/fwlink/p/?linkid=[0-9]\+&clcid=0x[0-9a-z]\+&culture=${culture,,}&country=${country,,}"
+  all_links=$(printf '%s\n' "$page" |
+    grep -Eio "https://go\.microsoft\.com/fwlink(/p)?/\?[^\"'<>[:space:]]+" |
+    awk 'NF && !seen[$0]++') || {
+    error "Evaluation Center download page gave us no download link!"
+    return 1
+  }
+
+  # Older Evaluation Center pages identify the language directly in the
+  # fwlink query. Keep that efficient path when those parameters are usable.
+  links=$(printf '%s\n' "$all_links" |
+    grep -Ei '(^|[?&])culture='"${culture,,}"'(&|$)' |
+    grep -Ei '(^|[?&])country='"${country,,}"'(&|$)') || links=""
+
+  if [ -z "$links" ]; then
+
+    culture_key="${culture,,}"
+    culture_key="${culture_key//[^[:alnum:]]/}"
+    culture_keys=("$culture_key")
+
+    case "$culture_key" in
+      "jajp" ) culture_keys+=("jpjp") ;;
+      "zhtw" ) culture_keys+=("cntw") ;;
+    esac
+
+    # Current Evaluation Center pages reuse en-US query parameters for every
+    # language. Their first redirect target still carries the actual locale,
+    # so inspect that target without following the complete download chain.
+    while IFS= read -r candidate; do
+
+      [ -n "$candidate" ] || continue
+
+      redirect=$(curlRequest "Microsoft" "$agent" \
+        --output /dev/null \
+        --write-out "%{redirect_url}" \
+        --head \
+        -- "$candidate") || {
+          rc=$?
+          (( rc == 1 )) || return "$rc"
+          continue
+        }
+
+      [ -n "$redirect" ] || continue
+
+      # Match against the complete redirect URL so locale path segments are
+      # recognized as well as locale markers in the target filename.
+      redirect_key="${redirect%%[?#]*}"
+      redirect_key="${redirect_key,,}"
+      redirect_key="${redirect_key//[^[:alnum:]]/}"
+      matched=""
+
+      for key in "${culture_keys[@]}"; do
+        [[ "$redirect_key" == *"$key"* ]] || continue
+        matched="Y"
+        break
+      done
+
+      [ -n "$matched" ] || continue
+
+      [ -n "$links" ] && links+=$'\n'
+      links+="$candidate"
+
+    done <<< "$all_links"
+
   fi
 
-  links=$(echo "$page" | grep -io "$filter") || {
-    # This should only happen if there's been some change to the download endpoint web address
+  if [ -z "$links" ]; then
+    # Distinguish a changed or missing English page from an unavailable
+    # translation for an otherwise supported product.
     if [[ "${lang,,}" == "en" || "${lang,,}" == "en-"* ]]; then
-      error "Windows server download page gave us no download link!"
+      error "Evaluation Center download page gave us no download link!"
     else
       language=$(getLanguage "$lang" "desc")
       error "No download in the $language language available for $desc!"
     fi
     return 1
-  }
+  fi
 
+  mapfile -t link_list <<< "$links"
+
+  # Evaluation pages currently expose several matching fwlinks in a known
+  # product/platform order, so select the entry for the requested variant.
   case "$type" in
-    "iot" | "ltsc" )
+    "iot" )
       case "${PLATFORM,,}" in
         "x64" )
-          if [[ "$winVer" != "windows-10"* ]]; then
-            link=$(echo "$links" | head -n 1)
-          else
-            link=$(echo "$links" | head -n 4 | tail -n 1)
-          fi ;;
+          link_index=0 ;;
         "arm64" )
-          link=$(echo "$links" | head -n 2 | tail -n 1) ;;
+          link_index=1 ;;
+      esac ;;
+    "ltsc" )
+      case "${PLATFORM,,}" in
+        "x64" )
+          link_index=1 ;;
       esac ;;
     "enterprise" )
       case "${PLATFORM,,}" in
         "x64" )
           if [[ "$winVer" != "windows-10"* ]]; then
-            link=$(echo "$links" | head -n 1)
+            link_index=0
           else
-            link=$(echo "$links" | head -n 2 | tail -n 1)
+            link_index=1
           fi ;;
         "arm64" )
-          link=$(echo "$links" | head -n 2 | tail -n 1) ;;
+          link_index=1 ;;
       esac ;;
     "server" )
       case "${PLATFORM,,}" in
         "x64" )
-          link=$(echo "$links" | head -n 1) ;;
+          link_index=0 ;;
       esac ;;
     * )
       error "Invalid type specified, value \"$type\" is not recognized!" && return 1 ;;
   esac
 
-  [ -z "$link" ] && error "Could not parse download link from page!" && return 1
+  if (( link_index < 0 || link_index >= ${#link_list[@]} )); then
+    error "Could not find the requested download link on the Evaluation Center page!"
+    return 1
+  fi
 
-  # Follow redirect so proceeding log message is useful
-  # This is a request we make that Fido doesn't
+  link="${link_list[$link_index]}"
 
-  curlRequest link "Microsoft" "$agent" \
+  # Resolve the fwlink now so later logging and platform validation use the
+  # actual ISO URL rather than Microsoft's generic redirect.
+
+  link=$(curlRequest "Microsoft" "$agent" \
     --location \
     --output /dev/null \
     --write-out "%{url_effective}" \
     --head \
-    -- "$link" || return 1
+    -- "$link") || return
 
+  local lower="${link,,}"
+  local separator='(^|[[:space:]_./-])'
+
+  # Guard against page-order changes resolving to the wrong architecture
+  # before downloading a multi-gigabyte image.
   case "${PLATFORM,,}" in
     "x64" )
-      if [[ "${link,,}" != *"x64"* ]]; then
+      if [[ "$lower" =~ ${separator}(arm64|a64) ]]; then
         echo "Found download link: $link"
         error "Download link is for the wrong platform? Please report this at $SUPPORT/issues"
         return 1
       fi ;;
     "arm64" )
-      if [[ "${link,,}" != *"a64"* && "${link,,}" != *"arm64"* ]]; then
+      if [[ "$lower" =~ ${separator}(x64|x86|amd64) ]]; then
         if enabled "$DEBUG"; then
           echo "Found download link: $link"
           echo "Link for ARM platform currently not available!"
@@ -414,11 +529,24 @@ downloadWindowsEval() {
       fi ;;
   esac
 
+  # During debug verification, compare the resolved filename with the static
+  # catalog entry to expose unexpected changes on Microsoft's page.
   if enabled "$DEBUG" && enabled "$VERIFY" && [[ "${lang,,}" == "en"* ]]; then
+
     compare=$(getMido "$id" "$lang" "")
-    if [[ "${link,,}" != "${compare,,}" ]]; then
-      echo "Retrieved link does not match the fixed link: $compare"
+
+    if [ -n "$compare" ]; then
+      link_name="${link%%[?#]*}"
+      link_name="${link_name##*/}"
+
+      compare_name="${compare%%[?#]*}"
+      compare_name="${compare_name##*/}"
+
+      if [[ "${link_name,,}" != "${compare_name,,}" ]]; then
+        echo "Retrieved ISO file $link_name does not match the pre-defined filename: $compare_name"
+      fi
     fi
+
   fi
 
   MIDO_URL="$link"
@@ -430,80 +558,100 @@ getWindows() {
   local version="$1"
   local lang="$2"
   local desc="$3"
+  local web_desc="$4"
 
-  local language edition
+  local language edition rc
+
+  MIDO_STATIC="N"
+
   language=$(getLanguage "$lang" "desc")
-  edition=$(printEdition "$version" "$desc")
+  edition=$(printEdition "$version" "$desc" "Y")
 
   local msg="Requesting $desc from the Microsoft servers..."
-  info "$msg" && html "$msg"
+  local web_msg="Requesting $web_desc from the Microsoft servers..."
+  info "$msg" && html "$web_msg"
 
+  # These sources are only published in English, so avoid trying download
+  # routes that cannot satisfy the requested language.
   case "${version,,}" in
-    "win2008r2" | "win81${PLATFORM,,}"* | "win10${PLATFORM,,}-enterprise"* | \
-    "win11${PLATFORM,,}-enterprise-iot"* | "win11${PLATFORM,,}-enterprise-ltsc"* )
+    "win2008r2"* | \
+    "win81${PLATFORM,,}"* | \
+    "win10${PLATFORM,,}-enterprise-ltsc-eval" | \
+    "win11${PLATFORM,,}-enterprise-iot-eval" )
+
       if [[ "${lang,,}" != "en" && "${lang,,}" != "en-"* ]]; then
         error "No download in the $language language available for $edition!"
-        MIDO_URL="" && return 1
+        MIDO_URL=""
+        return 1
       fi ;;
+
   esac
 
+  # ARM64 downloads exist only for the explicitly supported Windows 11
+  # routes; all other catalog entries remain x64-only.
   case "${version,,}" in
+    "win10x64" ) ;;
     "win11${PLATFORM,,}" ) ;;
     "win11${PLATFORM,,}-enterprise"* ) ;;
     * )
-      if [[ "${PLATFORM,,}" != "x64" ]]; then
+
+      if ! isPlatform "x64"; then
         error "No download for the ${PLATFORM^^} platform available for $edition!"
-        MIDO_URL="" && return 1
+        MIDO_URL=""
+        return 1
       fi ;;
+
   esac
 
+  # Prefer live Microsoft download routes. Unsupported or failed live routes
+  # fall through to the configured static catalog below.
   case "${version,,}" in
-    "win11${PLATFORM,,}" )
-      downloadWindows "$version" "$lang" "$edition" && return 0
-      ;;
+
+    "win10x64" | "win11${PLATFORM,,}" )
+
+      if downloadWindows "$version" "$lang" "$edition"; then
+        return 0
+      else
+        rc=$?
+      fi
+      
+      (( rc == 1 )) || return "$rc" ;;
+
     "win11${PLATFORM,,}-enterprise"* )
-      downloadWindowsEval "$version" "$lang" "$edition" && return 0
-      ;;
-    "win2025-eval" | "win2022-eval" | "win2019-eval" | "win2019-hv" | "win2016-eval" | "win2012r2-eval" )
-      downloadWindowsEval "$version" "$lang" "$edition" && return 0
-      ;;
-    "win2008r2" | "win81${PLATFORM,,}"* | "win10${PLATFORM,,}-enterprise"* )
-      ;;
-    * ) error "Invalid VERSION specified, value \"$version\" is not recognized!" ;;
+
+      if downloadWindowsEval "$version" "$lang" "$edition"; then
+        return 0
+      else
+        rc=$?
+      fi
+      
+      (( rc == 1 )) || return "$rc" ;;
+
+    "win2025-eval" | "win2022-eval" | "win2019-eval" | \
+    "win2019-hv" | "win2016-eval" | "win2012r2-eval" )
+
+      if downloadWindowsEval "$version" "$lang" "$edition"; then
+        return 0
+      else
+        rc=$?
+      fi
+      
+      (( rc == 1 )) || return "$rc" ;;
+
+    "win2008r2"*| "win81${PLATFORM,,}"* | "win10${PLATFORM,,}-enterprise"* ) ;;
+
+    * )
+      error "Invalid VERSION specified, value \"$version\" is not recognized!"
+      return 1 ;;
+
   esac
 
+  # Static catalog URLs are the last resort after live Microsoft methods are
+  # unavailable or have failed.
   MIDO_URL=$(getMido "$version" "$lang" "")
   [ -z "$MIDO_URL" ] && return 1
 
-  return 0
-}
-
-getBuild() {
-
-  local id="$1"
-  local ret="$2"
-  local url=""
-  local name=""
-  local build="$3"
-  local edition=""
-  local file="catalog.xml"
-
-  case "${id,,}" in
-    "win11${PLATFORM,,}" )
-      name="Windows 11 Pro"
-      url="https://worproject.com/dldserv/esd/getcatalog.php?build=${build}&arch=${PLATFORM^^}&edition=Professional" ;;
-    "win11${PLATFORM,,}-enterprise" | "win11${PLATFORM,,}-enterprise-eval")
-      name="Windows 11 Enterprise"
-      url="https://worproject.com/dldserv/esd/getcatalog.php?build=${build}&arch=${PLATFORM^^}&edition=Enterprise" ;;
-  esac
-
-  case "${ret,,}" in
-    "url" ) echo "$url" ;;
-    "file" ) echo "$file" ;;
-    "name" ) echo "$name" ;;
-    "edition" ) echo "$edition" ;;
-    *) echo "";;
-  esac
+  MIDO_STATIC="Y"
 
   return 0
 }
@@ -512,14 +660,18 @@ getCatalog() {
 
   local id="$1"
   local ret="$2"
-  local url=""
-  local name=""
-  local edition=""
+  local source="${3:-microsoft}"
+
   local file="catalog.cab"
+  local url="" name="" edition=""
 
   if [[ "${id,,}" == "win11"* ]] && ! isCompatible; then
     # ARMv8.0 cannot run Windows 11 builds 24H2 and up.
-    getBuild "$1" "$2" "22631.2861" && return 0
+    getWorCatalog "$1" "$2" "22631.2861" && return 0
+  fi
+
+  if [[ "${source,,}" == "wor" ]]; then
+    getWorCatalog "$1" "$2" && return 0
   fi
 
   case "${id,,}" in
@@ -545,21 +697,239 @@ getCatalog() {
     "url" ) echo "$url" ;;
     "file" ) echo "$file" ;;
     "name" ) echo "$name" ;;
-    "edition" ) echo '[Edition="'"${edition}"'"]' ;;
+    "edition" ) echo "$edition" ;;
     *) echo "";;
   esac
 
   return 0
 }
 
-getXmlTag() {
+getWorCatalog() {
 
-  local tag="$1"
-  local file="$2"
+  local id="$1"
+  local ret="$2"
+  local build="${3:-}"
 
-  xmllint --nonet --xpath "//$tag" "$file" 2>/dev/null | sed -E -e "s/<[\/]?$tag>//g" || true
+  local file="catalog.xml"
+  local name="" filter="" url=""
+  local version="" edition="" arch=""
+
+  case "${PLATFORM,,}" in
+    "x64" ) arch="x64" ;;
+    "arm64" ) arch="ARM64" ;;
+  esac
+
+  case "${id,,}" in
+    "win11${PLATFORM,,}" )
+      version="11"
+      filter="Professional"
+      name="Windows 11 Pro" ;;
+    "win10${PLATFORM,,}" )
+      version="10"
+      filter="Professional"
+      name="Windows 10 Pro" ;;
+    "win11${PLATFORM,,}-enterprise" | "win11${PLATFORM,,}-enterprise-eval")
+      version="11"
+      filter="Enterprise"
+      name="Windows 11 Enterprise" ;;
+    "win10${PLATFORM,,}-enterprise" | "win10${PLATFORM,,}-enterprise-eval" )
+      version="10"
+      filter="Enterprise"
+      name="Windows 10 Enterprise" ;;
+  esac
+
+  if [ -n "$version" ] && [ -n "$arch" ]; then
+    url="https://worproject.com/dldserv/esd/getcatalog.php?ver=${version}&arch=${arch}&edition=${filter}"
+    [ -n "$build" ] && url+="&build=${build}"
+  fi
+
+  case "${ret,,}" in
+    "url" ) echo "$url" ;;
+    "file" ) echo "$file" ;;
+    "name" ) echo "$name" ;;
+    "edition" ) echo "$edition" ;;
+    *) echo "";;
+  esac
 
   return 0
+}
+
+parseESD() {
+
+  local xml="$1"
+  local version="$2"
+  local lang="$3"
+  local desc="$4"
+  local edition="$5"
+  local culture="$6"
+
+  local xmlFile="${xml##*/}"
+  local file_size file_edition file_culture
+  local file_path file_sum file_sha1 file_sha256
+  local file_match=0 language_match=0
+  local records architecture language separator=$'\x1f'
+  local upper="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+  local lower="abcdefghijklmnopqrstuvwxyz"
+
+  ESD=""
+  ESD_SUM=""
+  ESD_SIZE=""
+
+  # Microsoft catalogs may use different XML namespaces, tag casing, and checksum
+  # algorithms. Flatten the catalog once so all selection logic remains in Bash.
+  local lname="translate(local-name(), '$upper', '$lower')"
+
+  if ! records=$(xmlstarlet sel -T -t \
+      -m "//*[$lname='file']" \
+        -v "normalize-space(*[$lname='architecture'][1])" -o "$separator" \
+        -v "normalize-space(*[$lname='edition'][1])" -o "$separator" \
+        -v "normalize-space(*[$lname='languagecode'][1])" -o "$separator" \
+        -v "normalize-space(*[$lname='filepath'][1])" -o "$separator" \
+        -v "normalize-space(*[$lname='sha256'][1])" -o "$separator" \
+        -v "normalize-space(*[$lname='sha1'][1])" -o "$separator" \
+        -v "normalize-space(*[$lname='size'][1])" \
+        -n \
+      "$xml" 2>/dev/null); then
+
+    error "Failed to parse $xmlFile!"
+    return 1
+  fi
+
+  # Track product/platform and language matches separately so failures can
+  # distinguish an unavailable edition from an unavailable translation.
+  while IFS="$separator" read -r \
+    architecture file_edition file_culture \
+    file_path file_sha256 file_sha1 file_size; do
+
+    [ -n "$architecture$file_path$file_sha256$file_sha1$file_size$file_culture$file_edition" ] || continue
+
+    [ "${architecture,,}" = "${PLATFORM,,}" ] || continue
+
+    if [ -n "$edition" ] &&
+      [ "${file_edition,,}" != "${edition,,}" ]; then
+      continue
+    fi
+
+    file_match=1
+
+    [ "${file_culture,,}" = "${culture,,}" ] || continue
+
+    language_match=1
+    file_sum="${file_sha256:-$file_sha1}"
+
+    ESD="$file_path"
+    ESD_SUM="$file_sum"
+    ESD_SIZE="$file_size"
+    break
+
+  done <<< "$records"
+
+  if (( ! file_match )); then
+    desc=$(printEdition "$version" "$desc" "Y")
+    error "No download link available for $desc!"
+    return 1
+  fi
+
+  if (( ! language_match )); then
+    desc=$(printEdition "$version" "$desc" "Y")
+    language=$(getLanguage "$lang" "desc")
+    error "No download in the $language language available for $desc!"
+    return 1
+  fi
+
+  if [ -z "$ESD" ]; then
+    error "Failed to find ESD URL in $xmlFile!"
+    return 1
+  fi
+
+  if [ -z "$ESD_SUM" ]; then
+    error "Failed to find ESD checksum in $xmlFile!"
+    return 1
+  fi
+
+  if [ -z "$ESD_SIZE" ]; then
+    error "Failed to find ESD filesize in $xmlFile!"
+    return 1
+  fi
+
+  return 0
+}
+
+getCatalogError() {
+
+  local file="$1"
+  local result=""
+
+  [ -s "$file" ] || return 0
+
+  # Prefer leaf text when the response is parseable XML, separating adjacent
+  # elements so HTML error pages remain readable. Fall back to the beginning
+  # of a plain-text response when XML parsing fails.
+  result=$(xmlstarlet sel -T -t \
+    -m '//*[not(*) and normalize-space()]' \
+      -v 'normalize-space(.)' -o ' ' \
+    "$file" 2>/dev/null) || result=$(head -c 1024 -- "$file" 2>/dev/null || :)
+
+  # Keep upstream error details useful without allowing control sequences,
+  # multiline output, or a complete HTML error page into the application log.
+  result=$(
+    printf '%s' "$result" | \
+      LC_ALL=C tr -cd '\11\12\15\40-\176' | \
+      sed 's/<[^>]*>/ /g' | tr '\r\n\t' '   ' | \
+      sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//'
+  )
+
+  if (( ${#result} > 500 )); then
+    result="${result:0:500}..."
+  fi
+
+  printf '%s' "$result"
+  return 0
+}
+
+validateESDCatalog() {
+
+  local xml="$1"
+  local provider="$2"
+
+  local metadata root fileCount 
+  local separator=$'\x1f' response
+  local upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+  local lower='abcdefghijklmnopqrstuvwxyz'
+
+  if [ ! -s "$xml" ]; then
+    error "$provider returned an empty ESD catalog!"
+    return 1
+  fi
+
+  # Successful Microsoft and WoR responses contain an MCT document with at
+  # least one File record. Reject API error tokens and unrelated XML before
+  # parseESD can misreport them as a products.xml parsing failure.
+  if metadata=$(xmlstarlet sel \
+      -T -t \
+      -v "translate(local-name(/*), '$upper', '$lower')" -o "$separator" \
+      -v "count(/*[translate(local-name(), '$upper', '$lower')='mct']//*[translate(local-name(), '$upper', '$lower')='file'])" \
+      "$xml" 2>/dev/null); then
+
+    IFS="$separator" read -r root fileCount <<< "$metadata"
+
+    if [ "$root" = "mct" ] &&
+        [[ "$fileCount" =~ ^[0-9]+$ ]] &&
+        (( fileCount > 0 )); then
+      return 0
+    fi
+
+  fi
+
+  response=$(getCatalogError "$xml") || response=""
+
+  if [ -n "$response" ]; then
+    error "$provider returned: $response"
+  else
+    error "$provider returned an invalid ESD catalog!"
+  fi
+
+  return 1
 }
 
 getESD() {
@@ -568,35 +938,45 @@ getESD() {
   local version="$2"
   local lang="$3"
   local desc="$4"
-  local file result culture
-  local language edition catalog
-  local xmlFile="products.xml"
-  local esdFile="esd_edition.xml"
-  local filterFile="products_filter.xml"
-  local log query rc=0 reason=""
+  local source="${5:-microsoft}"
 
-  file=$(getCatalog "$version" "file")
-  catalog=$(getCatalog "$version" "url")
+  local xmlFile="products.xml"
+  local file culture provider
+  local edition catalog log rc=0
+
   culture=$(getLanguage "$lang" "culture")
-  edition=$(getCatalog "$version" "edition")
+  file=$(getCatalog "$version" "file" "$source")
+  catalog=$(getCatalog "$version" "url" "$source")
+  edition=$(getCatalog "$version" "edition" "$source")
 
   if [ -z "$file" ] || [ -z "$catalog" ]; then
     error "Invalid VERSION specified, value \"$version\" is not recognized!"
     return 1
   fi
 
-  local msg="Downloading catalog from the Microsoft servers..."
+  provider="Microsoft"
+  [[ "${file,,}" == *.xml ]] && provider="WoR"
+
+  local msg="Downloading ESD catalog..."
   info "$msg" && html "$msg"
 
-  rm -rf "$dir"
+  if ! rm -rf "$dir"; then
+    error "Failed to remove directory \"$dir\" !"
+    return 1
+  fi
 
   if ! makeDir "$dir"; then
     error "Failed to create directory \"$dir\" !"
     return 1
   fi
 
-  log=$(mktemp)
+  if ! log=$(mktemp -p "$QEMU_DIR"); then
+    error "Failed to create a temporary wget log."
+    return 1
+  fi
 
+  # Preserve wget's status under errexit so its log can provide the actual
+  # server or filesystem failure reason.
   {
     LC_ALL=C wget "$catalog" -O "$dir/$file" --no-verbose --timeout=30 \
       --no-http-keep-alive --output-file="$log"
@@ -605,6 +985,7 @@ getESD() {
 
   if (( rc != 0 )); then
 
+    local reason
     reason=$(sed -n \
       -e 's/^wget: //p' \
       -e 's/^[0-9-]\{10\} [0-9:]\{8\} ERROR //p' \
@@ -621,12 +1002,18 @@ getESD() {
     fi
 
     rm -f "$log"
+
+    (( rc >= 129 )) && return "$rc"
     return 1
   fi
 
   rm -f "$log"
 
-  if [[ "$file" == *".xml" ]]; then
+  # Microsoft catalogs arrive as CAB archives. WoR catalogs are returned as
+  # XML and must be validated before they are published as products.xml.
+  if [[ "${file,,}" == *.xml ]]; then
+
+    validateESDCatalog "$dir/$file" "$provider" || return 1
 
     if ! mv -f "$dir/$file" "$dir/$xmlFile"; then
       error "Failed to rename $file to $xmlFile."
@@ -650,56 +1037,13 @@ getESD() {
     return 1
   fi
 
-  query='//File[Architecture="'${PLATFORM,,}'"]'"${edition}"''
-  result=$(xmllint --nonet --xpath "${query}" "$dir/$xmlFile" 2>/dev/null || true)
-
-  if [ -z "$result" ]; then
-
-    query='//File[Architecture="'${PLATFORM^^}'"]'"${edition}"''
-    result=$(xmllint --nonet --xpath "${query}" "$dir/$xmlFile" 2>/dev/null || true)
-
-    if [ -z "$result" ]; then
-      desc=$(printEdition "$version" "$desc")
-      language=$(getLanguage "$lang" "desc")
-      error "No download link available for $desc!"
-      return 1
-    fi
-
+  # Validate extracted Microsoft catalogs as well, so parseESD only receives
+  # the catalog format it expects.
+  if [[ "${file,,}" != *.xml ]]; then
+    validateESDCatalog "$dir/$xmlFile" "$provider" || return 1
   fi
 
-  echo -e '<Catalog>' > "$dir/$filterFile"
-  echo "$result" >> "$dir/$filterFile"
-  echo -e '</Catalog>'>> "$dir/$filterFile"
-
-  result=$(xmllint --nonet --xpath "//File[LanguageCode=\"${culture,,}\"]" "$dir/$filterFile" 2>/dev/null || true)
-
-  if [ -z "$result" ]; then
-    desc=$(printEdition "$version" "$desc")
-    language=$(getLanguage "$lang" "desc")
-    error "No download in the $language language available for $desc!"
-    return 1
-  fi
-
-  echo "$result" > "$dir/$esdFile"
-
-  ESD=$(getXmlTag "FilePath" "$dir/$esdFile")
-
-  if [ -z "$ESD" ]; then
-    error "Failed to find ESD URL in $esdFile!"
-    return 1
-  fi
-
-  ESD_SUM=$(getXmlTag "Sha1" "$dir/$esdFile")
-
-  if [ -z "$ESD_SUM" ]; then
-    error "Failed to find ESD checksum in $esdFile!"
-    return 1
-  fi
-
-  ESD_SIZE=$(getXmlTag "Size" "$dir/$esdFile")
-
-  if [ -z "$ESD_SIZE" ]; then
-    error "Failed to find ESD filesize in $esdFile!"
+  if ! parseESD "$dir/$xmlFile" "$version" "$lang" "$desc" "$edition" "$culture"; then
     return 1
   fi
 
@@ -709,11 +1053,22 @@ getESD() {
 
 isCompressed() {
 
-  local file="$1"
+  local url="${1%%[\?#]*}"
+  local file
 
+  file=$(basename "$url")
+  printf -v file '%b' "${file//%/\\x}"
+
+  # The ReactOS latest-build endpoint returns an archive without a filename
+  # extension, so recognize its path explicitly.
   case "${file,,}" in
-    *".7z" | *".zip" | *".rar" | *".lzma" | *".bz" | *".bz2" )
+    *.7z | *.zip | *.rar | *.tar | *.cab | *.cpio | \
+    *.lzh | *.lha | *.xar )
       return 0 ;;
+  esac
+
+  case "${url,,}" in
+    */latest-x86-gcc-lin-rel ) return 0 ;;
   esac
 
   return 1
@@ -732,33 +1087,42 @@ verifyFile() {
     fi
   fi
 
-  local hash=""
-  local algo="SHA256"
+  local type="ISO" algo="SHA256" hash
 
   [ -z "$check" ] && return 0
-  ! enabled "$VERIFY" && return 0
-  [[ "${#check}" == "40" ]] && algo="SHA1"
+  enabled "$VERIFY" || return 0
 
-  local msg="Verifying downloaded ISO..."
+  # Microsoft ESD catalogs publish SHA1, while current mirror metadata normally
+  # uses SHA256; the digest length identifies which algorithm is required.
+  [[ "${#check}" == "40" ]] && algo="SHA1"
+  [[ "${iso,,}" == *.esd ]] && type="ESD file"
+
+  local msg="Verifying downloaded $type..."
   info "$msg" && html "$msg"
 
   if [[ "${algo,,}" != "sha256" ]]; then
-    if ! hash=$(sha1sum "$iso" | cut -f1 -d' '); then
+
+    hash=$(sha1sum "$iso" | cut -f1 -d' ') || {
+      local rc=$?
       error "Failed to calculate SHA1 checksum for $iso!"
-      return 1
-    fi
+      return "$rc"
+    }
+
   else
-    if ! hash=$(sha256sum "$iso" | cut -f1 -d' '); then
+
+    hash=$(sha256sum "$iso" | cut -f1 -d' ') || {
+      local rc=$?
       error "Failed to calculate SHA256 checksum for $iso!"
-      return 1
-    fi
+      return "$rc"
+    }
+
   fi
 
-  if [[ "$hash" == "$check" ]]; then
-    info "Successfully verified ISO!" && return 0
+  if [[ "${hash,,}" == "${check,,}" ]]; then
+    info "Successfully verified $type!" && return 0
   fi
 
-  error "The downloaded file has an unknown $algo checksum: $hash , as the expected value was: $check. Please report this at $SUPPORT/issues"
+  warn "the downloaded file has an unknown $algo checksum: $hash , as the expected value was: $check. Please report this at $SUPPORT/issues"
   return 1
 }
 
@@ -766,122 +1130,38 @@ downloadFile() {
 
   local iso="$1"
   local url="$2"
-  local sum="$3"
-  local size="$4"
-  local lang="$5"
-  local desc="$6"
-  local reason=""
-  local msg="Downloading $desc"
-  local rc total total_gb log
-  local domain dots agent space folder
-  local progress=()
-  local output=""
+  local size="$3"
+  local desc="$4"
+  local web_desc="$5"
+  local connections="${6:-1}"
 
-  agent=$(getAgent)
+  local domain parent
+  local msg="Downloading $web_desc"
+  local console_msg="Downloading $desc"
 
-  if [ -n "$size" ] && [[ "$size" != "0" ]]; then
+  # Keep mirror messages concise by reducing subdomains to the final two
+  # labels, while Microsoft downloads retain the generic description.
+  domain="${url#*://}"
+  domain="${domain%%/*}"
 
-    folder=$(dirname -- "$iso")
-
-    if ! space=$(df --output=avail -B 1 "$folder" | tail -n 1); then
-      error "Failed to check free space in $folder!"
-      return 1
-    fi
-
-    total_gb=$(formatBytes "$space")
-    (( size > space )) && error "Not enough free space to download file, only $total_gb left!" && return 1
+  if [[ "$domain" == *.*.* ]]; then
+    parent="${domain#*.}"
+    [ -n "$parent" ] && domain="$parent"
   fi
-
-  # Use Wget's progress bar in a terminal and progress.sh in container logs.
-  if [ -t 1 ]; then
-    progress=( --show-progress --progress=bar:noscroll )
-  else
-    output="log"
-  fi
-
-  html "$msg..."
-  /run/progress.sh "$iso" "${size:-0}" "$msg ([P])..." "$output" &
-
-  domain=$(echo "$url" | awk -F/ '{print $3}')
-  dots=$(echo "$domain" | tr -cd '.' | wc -c)
-  (( dots > 1 )) && domain=$(expr "$domain" : '.*\.\(.*\..*\)')
 
   if [ -n "$domain" ] && [[ "${domain,,}" != *"microsoft.com" ]]; then
-    msg="Downloading $desc from $domain"
+    console_msg="Downloading $desc from $domain"
   fi
 
-  info "$msg..."
-  log=$(mktemp)
-  enabled "$DEBUG" && echo "Downloading: $url"
+  info "$console_msg..."
 
-  {
-    LC_ALL=C wget "$url" -O "$iso" --continue --no-verbose --timeout=30 \
-      --no-http-keep-alive --user-agent "$agent" \
-      "${progress[@]}" --output-file="$log"
-    rc=$?
-  } || :
-
-  fKill "progress.sh"
-
-  if (( rc != 0 )); then
-    reason=$(sed -n \
-      -e 's/^wget: //p' \
-      -e 's/^[0-9-]\{10\} [0-9:]\{8\} ERROR //p' \
-      "$log" | tail -n 1)
-  fi
-
-  rm -f "$log"
-
-  if (( rc == 0 )) && [ -f "$iso" ]; then
-
-    if ! total=$(stat -c%s "$iso"); then
-      error "Failed to determine downloaded file size: $iso"
-      return 1
-    fi
-
-    total_gb=$(formatBytes "$total")
-
-    if [ "$total" -lt 100000000 ]; then
-      error "Invalid download link: $url (is only $total_gb ?). Please report this at $SUPPORT/issues"
-      return 1
-    fi
-
-    # Status 2 means the download completed but failed validation.
-    verifyFile "$iso" "$size" "$total" "$sum" || return 2
-
-    # Extract the .iso from the compressed archive if needed.
-    isCompressed "$url" && UNPACK="Y"
-
-    return 0
-  fi
-
-  msg="Failed to download $url"
-
-  if (( rc == 3 )); then
-    error "$msg because the file could not be written (disk full?)."
-  elif [ -n "$reason" ]; then
-    error "$msg: ${reason%.}."
-  else
-    error "$msg with exit status $rc."
-  fi
-
-  return 1
-}
-
-delay() {
-
-  local i
-  local delay="$1"
-  local msg="Will retry in X seconds..."
-
-  info "${msg/X/$delay}"
-
-  for i in $(seq "$delay" -1 1); do
-    html "${msg/X/$i}"
-    sleep 1
-  done
-
-  return 0
+  downloadToFile \
+    "$url" \
+    "$iso" \
+    "$msg" \
+    "${size:-0}" \
+    "$connections" \
+    "Y"
 }
 
 tryDownload() {
@@ -890,51 +1170,92 @@ tryDownload() {
   local url="$2"
   local sum="$3"
   local size="$4"
-  local lang="$5"
-  local desc="$6"
-  local seconds="$7"
-  local rc=0
+  local desc="$5"
+  local seconds="$6"
+  local web_desc="$7"
 
-  rm -f "$iso"
+  local total minimum="104857600"
 
-  if downloadFile "$iso" "$url" "$sum" "$size" "$lang" "$desc"; then
-    return 0
-  else
-    rc=$?
+  if [ -z "$iso" ] || [ -z "$url" ]; then
+    error "Invalid download parameters!"
+    return 1
+  fi
+  
+  # Compressed archives can legitimately be much smaller than the ISO they
+  # contain, so use a lower sanity threshold until extraction.
+  if isCompressed "$url"; then
+    minimum="10485760"
   fi
 
-  # Do not download the same file again when its contents failed validation.
-  if (( rc == 2 )); then
-    rm -f "$iso"
+  downloadRetry \
+    "$iso" \
+    "${CONNECTIONS:-1}" \
+    "$seconds" \
+    "$desc" \
+    "$minimum" \
+    "$iso" \
+    "$url" \
+    "$size" \
+    "$desc" \
+    "$web_desc" || return
+
+  # The shared helper already inspected the file, so this should
+  # only fail if the downloaded file was removed unexpectedly afterward.
+  if ! total=$(stat -c%s -- "$iso" 2>/dev/null); then
+    error "Failed to determine downloaded file size: $iso"
     return 1
   fi
 
-  delay "$seconds"
+  # Status 2 means the completed download failed deterministic validation.
+  verifyFile "$iso" "$size" "$total" "$sum" || {
+    local rc=$?
+    (( rc == 1 )) || return "$rc"
 
-  if downloadFile "$iso" "$url" "$sum" "$size" "$lang" "$desc"; then
-    return 0
-  fi
+    if ! rm -f -- "$iso" "$iso.aria2"; then
+      warn "failed to remove invalid download \"$iso\"!"
+    fi
 
-  rm -f "$iso"
-  return 1
+    return 2
+  }
+
+  # Extract the .iso from the compressed archive if needed.
+  isCompressed "$url" && UNPACK="Y"
+
+  return 0
 }
 
-downloadImage() {
+fallbackEnglish() {
 
   local iso="$1"
   local version="$2"
   local lang="$3"
-  local tried="n"
-  local success="n"
-  local seconds="5"
-  local url sum size base desc language i
+  local desc="$4"
 
-  if [[ "${version,,}" == "http"* ]]; then
+  local culture
+  local msg="No working download method was found for $desc, falling back to English..."
 
-    base=$(basename "$iso")
-    desc=$(fromFile "$base")
+  info "$msg"
 
-    tryDownload "$iso" "$version" "" "" "" "$desc" "$seconds" && return 0
+  # Preserve the requested regional format and keyboard layout.
+  culture=$(getLanguage "$lang" "culture")
+  [ -z "$REGION" ] && REGION="$culture"
+  [ -z "$KEYBOARD" ] && KEYBOARD="$culture"
+
+  # Keep the original language-specific ISO filename so that restarts
+  # still locate the same image, but use English installation media.
+  LANGUAGE="en"
+
+  removeImage "$iso" || return
+
+  downloadImage "$iso" "$version" "$LANGUAGE"
+}
+
+validDownload() {
+
+  local version="$1"
+
+  if [ -z "$version" ]; then
+    error "Cannot download a Windows image without a version!"
     return 1
   fi
 
@@ -943,28 +1264,78 @@ downloadImage() {
     return 1
   fi
 
-  desc=$(printVersion "$version" "")
+  return 0
+}
+
+downloadImage() {
+
+  local iso="$1"
+  local version="$2"
+  local lang="$3"
+
+  local requested="$version"
+  local tried="n" success="n" seconds="5"
+  local i url sum size base language desc web_desc rc
+
+  if isURL "$version"; then
+
+    base=$(basename "$iso")
+    desc=$(fromFile "$base")
+    web_desc="$desc"
+
+    tryDownload "$iso" "$version" "" "" "$desc" "$seconds" "$web_desc" || {
+      rc=$?
+      error "Failed to download the Windows image from the specified URL!"
+      return "$rc"
+    }
+
+    return 0
+  fi
+
+  validDownload "$version" || return 1
+
+  desc=$(printVariant "$version" "" "Y")
+  web_desc=$(printVariant "$version" "")
 
   if [[ "${lang,,}" != "en" && "${lang,,}" != "en-"* ]]; then
+
     language=$(getLanguage "$lang" "desc")
+
     if ! validVersion "$version" "$lang"; then
-      desc=$(printEdition "$version" "$desc")
-      error "The $language language version of $desc is not available, please switch to English."
-      return 1
+
+      desc=$(printEdition "$version" "$desc" "Y")
+      web_desc=$(printEdition "$version" "$web_desc")
+      desc+=" in $language"
+
+      fallbackEnglish "$iso" "$version" "$lang" "$desc" || return
+      return 0
+
     fi
+
     desc+=" in $language"
   fi
 
+  # Prefer a live Microsoft URL and retry link generation once before moving
+  # on to ESD catalogs or mirrors.
   if isMido "$version" "$lang"; then
 
     tried="y"
     success="n"
 
-    if getWindows "$version" "$lang" "$desc"; then
+    if getWindows "$version" "$lang" "$desc" "$web_desc"; then
       success="y"
     else
-      delay "$seconds"
-      getWindows "$version" "$lang" "$desc" && success="y"
+      rc=$?
+      (( rc == 1 )) || return "$rc"
+
+      delay "$seconds" || return
+
+      if getWindows "$version" "$lang" "$desc" "$web_desc"; then
+        success="y"
+      else
+        rc=$?
+        (( rc == 1 )) || return "$rc"
+      fi
     fi
 
     if [[ "$success" == "y" ]]; then
@@ -974,18 +1345,44 @@ downloadImage() {
       sum=""
       size=""
 
-      # Skip verification if the retrieved URL differs from the static URL.
+      # Apply the metadata belonging to the configured static URL.
       if [[ "${MIDO_URL%%\?*}" == "${url%%\?*}" ]]; then
         size=$(getMido "$version" "$lang" "size")
         sum=$(getMido "$version" "$lang" "sum")
       fi
 
-      tryDownload "$iso" "$MIDO_URL" "$sum" "$size" "$lang" "$desc" "$seconds" && return 0
+      local download_desc="$desc"
+      if enabled "$MIDO_STATIC"; then
+        download_desc+=" using a static link"
+      fi
+
+      if tryDownload "$iso" "$MIDO_URL" "$sum" "$size" "$download_desc" "$seconds" "$web_desc"; then
+        return 0
+      else
+        rc=$?
+        (( rc == 1 || rc == 2 )) || return "$rc"
+      fi
 
     fi
   fi
 
-  switchEdition "$version"
+  # If an evaluation version was requested, switch to the 
+  # normal edition since none of our mirrors provide those.
+  if [[ "${version,,}" == *"-eval" ]]; then
+
+    version="${version::-5}"
+    validDownload "$version" || return 1
+
+    [ -n "$DETECTED" ] || DETECTED="$version"
+
+    desc=$(printVariant "$DETECTED" "" "Y")
+    web_desc=$(printVariant "$DETECTED" "")
+
+    if [[ "${lang,,}" != "en" && "${lang,,}" != "en-"* ]]; then
+      desc+=" in $language"
+    fi
+
+  fi
 
   if isESD "$version" "$lang"; then
 
@@ -999,23 +1396,36 @@ downloadImage() {
     if getESD "$TMP/esd" "$version" "$lang" "$desc"; then
       success="y"
     else
-      delay "$seconds"
-      getESD "$TMP/esd" "$version" "$lang" "$desc" && success="y"
+      rc=$?
+      (( rc == 1 )) || return "$rc"
+
+      if getESD "$TMP/esd" "$version" "$lang" "$desc" "wor"; then
+        success="y"
+      else
+        rc=$?
+        (( rc == 1 )) || return "$rc"
+      fi
     fi
 
     if [[ "$success" == "y" ]]; then
+
+      # Standalone ESD media requires a different extraction path, so expose
+      # its real extension through the active ISO variable.
       ISO="${ISO%.*}.esd"
 
-      if tryDownload "$ISO" "$ESD" "$ESD_SUM" "$ESD_SIZE" "$lang" "$desc" "$seconds"; then
+      if tryDownload "$ISO" "$ESD" "$ESD_SUM" "$ESD_SIZE" "$desc" "$seconds" "$web_desc"; then
         return 0
+      else
+        rc=$?
+        (( rc == 1 || rc == 2 )) || return "$rc"
       fi
 
       ISO="$iso"
-    fi
 
+    fi
   fi
 
-  for ((i=1;i<=MIRRORS;i++)); do
+  for ((i=1; i<=MIRRORS; i++)); do
 
     url=$(getLink "$i" "$version" "$lang")
 
@@ -1029,10 +1439,27 @@ downloadImage() {
       size=$(getSize "$i" "$version" "$lang")
       sum=$(getHash "$i" "$version" "$lang")
 
-      tryDownload "$iso" "$url" "$sum" "$size" "$lang" "$desc" "$seconds" && return 0
+      if tryDownload "$iso" "$url" "$sum" "$size" "$desc" "$seconds" "$web_desc"; then
+        return 0
+      else
+        rc=$?
+        (( rc == 1 || rc == 2 )) || return "$rc"
+      fi
+
     fi
 
   done
+
+  if [[ "${lang,,}" != "en" && "${lang,,}" != "en-"* ]]; then
+    fallbackEnglish "$iso" "$requested" "$lang" "$desc" || return
+    return 0
+  fi
+
+  if [[ "$tried" == "n" ]]; then
+    error "No download method is available for $desc!"
+  else
+    error "All download methods failed for $desc!"
+  fi
 
   return 1
 }

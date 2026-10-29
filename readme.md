@@ -67,20 +67,20 @@ docker run -it --rm --name windows -e "VERSION=11" -p 8006:8006 --device=/dev/kv
 kubectl apply -f https://raw.githubusercontent.com/dockur/windows/refs/heads/master/kubernetes.yml
 ```
 
+##### Desktop applications
+
+For a complete graphical desktop experience, see [WinBoat](https://winboat.app), [WinPodX](https://www.winpodx.org), or [WinApps](https://github.com/winapps-org/winapps). Each of these projects uses this container as its backend.
+
 ##### GitHub Codespaces:
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/dockur/windows)
-
-##### Graphical installer:
-
-[![Download WinBoat](https://github.com/dockur/windows/raw/master/.github/winboat.png)](https://winboat.app)
 
 ## Requirements ⚙️
 
 - Docker or Podman on a Linux host with KVM support.
 - Docker Desktop or Podman (Desktop) on Windows 11 with nested virtualization enabled.
-- At least 4 GB of available RAM.
-- At least 64 GB of free disk space.
+- At least 2 GB of available RAM.
+- At least 32 GB of free disk space.
 
 > [!NOTE]
 > Docker Desktop on Linux, macOS, and Windows 10 does not currently provide KVM access to containers and is therefore not supported.
@@ -125,6 +125,9 @@ kubectl apply -f https://raw.githubusercontent.com/dockur/windows/refs/heads/mas
   | `vu`   | Windows Vista Ultimate    | 3.0 GB   |
   | `xp`   | Windows XP Professional   | 0.6 GB   |
   | `2k`   | Windows 2000 Professional | 0.4 GB   | 
+  | `me`   | Windows ME                | 0.5 GB   |
+  | `98`   | Windows 98                | 0.7 GB   |
+  | `95`   | Windows 95                | 0.6 GB   |
   ||||  
   | `2025` | Windows Server 2025       | 7.6 GB   |
   | `2022` | Windows Server 2022       | 6.0 GB   |
@@ -133,6 +136,11 @@ kubectl apply -f https://raw.githubusercontent.com/dockur/windows/refs/heads/mas
   | `2012` | Windows Server 2012       | 4.3 GB   |
   | `2008` | Windows Server 2008       | 3.0 GB   |
   | `2003` | Windows Server 2003       | 0.6 GB   |
+  ||||  
+  | `core11`  | Tiny11 Core      | 3.0 GB   |
+  | `tiny11`  | Tiny11           | 5.3 GB   |
+  | `tiny10`  | Tiny10           | 3.6 GB   |
+  | `reactos` | ReactOS          | 0.1 GB   |
 
 > [!TIP]
 > To install ARM64 versions of Windows use [dockur/windows-arm](https://github.com/dockur/windows-arm/).
@@ -171,7 +179,7 @@ kubectl apply -f https://raw.githubusercontent.com/dockur/windows/refs/heads/mas
     -  ./example:/shared
   ```
 
-  Replace the example path `./example` with your desired shared folder, which then will become visible as `Shared`.
+  Replace the example path `./example` with your desired shared folder, which then will become visible as `Shared` on the desktop and as drive `Z:`.
 
 ### How do I change the amount of CPU or RAM?
 
@@ -216,6 +224,22 @@ kubectl apply -f https://raw.githubusercontent.com/dockur/windows/refs/heads/mas
     PASSWORD: "gates"
   ```
 
+  When `DOMAIN` is set, these variables are used as domain credentials instead.
+
+### How do I join an Active Directory domain?
+
+  Windows can automatically join an Active Directory domain during installation. Specify the domain name in your compose file:
+
+  ```yaml
+  environment:
+    DOMAIN: "example.com"
+    DOMAIN_OU: "OU=Virtual Machines,OU=Servers,DC=example,DC=com"
+  ```
+
+  Use the domain name, such as `example.com`, rather than a URL. The supplied account is added to the local Administrators group and automatically signed in after installation. `DOMAIN_OU` is optional and specifies where the computer account should be created. 
+
+  Windows must be able to resolve and reach the domain controller through the domain's DNS server.
+
 ### How do I select the Windows language?
 
   By default, the English version of Windows will be downloaded.
@@ -257,29 +281,25 @@ kubectl apply -f https://raw.githubusercontent.com/dockur/windows/refs/heads/mas
 
   Replace the example path `./example.iso` with the filename of your desired ISO file. The value of `VERSION` will be ignored in this case.
 
-### How do I run a script after installation?
+### How do I run a command after installation?
 
-  To run your own script after installation, you can create a file called `install.bat` and place it in a folder together with any additional files it needs (software to be installed for example).
-  
+  To execute a single command during the final step of the automatic installation, add the `COMMAND` environment variable:
+
+  ```yaml
+  environment:
+    COMMAND: 'reg add "HKLM\Software\Example" /v Enabled /t REG_DWORD /d 1 /f'
+  ```
+
+  To run a script or include additional files, create a file called `install.bat` and place it in a folder together with any files it needs, such as software to be installed.
+
   Then bind that folder in your compose file like this:
 
   ```yaml
   volumes:
-    -  ./example:/oem
+    - ./example:/oem
   ```
 
-  The example folder `./example` will be copied to `C:\OEM` and the `install.bat` file inside that folder will be executed during the last step of the automatic installation.
-
-### How do I perform a manual installation?
-
-  It's recommended to stick to the automatic installation, as it adjusts various settings to prevent common issues when running Windows inside a virtual environment.
-
-  However, if you insist on performing the installation manually (at your own risk), add the following environment variable to your compose file:
-
-  ```yaml
-  environment:
-    MANUAL: "Y"
-  ```
+  The example folder `./example` will be copied to `C:\OEM` and the `install.bat` file inside it will be executed during the final step of the automatic installation.
 
 ### How do I assign an individual IP address to the container?
 

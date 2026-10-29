@@ -10,10 +10,17 @@ cd /run
 
 . start.sh      # Startup hook
 . utils.sh      # Load functions
-. reset.sh      # Initialize system
+. init.sh       # Initialize system
+. memory.sh     # Check memory
 . server.sh     # Start webserver
+. download.sh   # Load functions
 . define.sh     # Define versions
 . mido.sh       # Download Windows
+. answer.sh     # Modern unattended
+. batch.sh      # Win9x unattended
+. sif.sh        # NT5 unattended
+. legacy.sh     # Legacy installs
+. image.sh      # Detect image files
 . install.sh    # Run installation
 . disk.sh       # Initialize disks
 . display.sh    # Initialize graphics
@@ -23,7 +30,6 @@ cd /run
 . boot.sh       # Configure boot
 . proc.sh       # Initialize processor
 . power.sh      # Configure shutdown
-. memory.sh     # Check available memory
 . balloon.sh    # Initialize ballooning
 . config.sh     # Configure arguments
 . finish.sh     # Finish initialization
@@ -57,11 +63,11 @@ if ! interactive; then
   "${cmd[@]}" ${ARGS:+ $ARGS} >"$pipe" 2>&1 &
 else
   startConsole "$pipe"
-  setsid -w "${cmd[@]}" ${ARGS:+ $ARGS} </dev/null >"$pipe" 2>&1 &
+  startQemu "${cmd[@]}" ${ARGS:+ $ARGS} >"$pipe" 2>&1
 fi
 
 pid=$!
-( sleep 30; boot ) &
+waitForBoot "$pid" 30 &
 
 rc=0
 wait "$pid" || rc=$?
